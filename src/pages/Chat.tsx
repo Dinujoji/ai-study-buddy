@@ -3,15 +3,16 @@ import { motion } from "framer-motion";
 import { Send, Bot, User, Sparkles } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/hooks/use-toast";
 
-/* Types for chat messages */
 interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
 }
 
-/* Suggested prompts for quick access */
+const CHAT_URL = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/chat`;
+
 const suggestions = [
   "Explain Binary Search Tree simply",
   "What are ACID properties?",
@@ -21,47 +22,92 @@ const suggestions = [
   "Explain normalization in DBMS",
 ];
 
-/* Mock AI response generator - will be replaced with real AI integration */
-const getMockResponse = (question: string): string => {
-  const q = question.toLowerCase();
-  if (q.includes("binary search"))
-    return `## Binary Search Tree (BST)\n\nA BST is a tree data structure where:\n- **Left child** < Parent\n- **Right child** > Parent\n\n### Example\n\`\`\`\n      8\n     / \\\\\n    3   10\n   / \\\\    \\\\\n  1   6   14\n\`\`\`\n\n### Operations\n| Operation | Average | Worst |\n|-----------|---------|-------|\n| Search    | O(log n)| O(n)  |\n| Insert    | O(log n)| O(n)  |\n| Delete    | O(log n)| O(n)  |\n\n💡 **Tip:** The worst case happens when the tree is skewed (like a linked list).`;
-  if (q.includes("acid"))
-    return `## ACID Properties\n\nACID ensures reliable database transactions:\n\n1. **Atomicity** – All or nothing. If one part fails, the entire transaction rolls back.\n2. **Consistency** – Database moves from one valid state to another.\n3. **Isolation** – Concurrent transactions don't interfere with each other.\n4. **Durability** – Once committed, data survives crashes.\n\n### Real-world Example\nThink of a bank transfer: ₹500 from A to B.\n- Atomicity: Both debit and credit must happen\n- Consistency: Total money stays the same\n- Isolation: Other transfers don't mix up\n- Durability: Transfer saved even if power goes out`;
-  if (q.includes("deadlock"))
-    return `## Deadlock in Operating Systems\n\nDeadlock occurs when processes are **waiting for each other** in a cycle, and none can proceed.\n\n### 4 Necessary Conditions\n1. **Mutual Exclusion** – Resource held exclusively\n2. **Hold and Wait** – Holding one, waiting for another\n3. **No Preemption** – Can't force release\n4. **Circular Wait** – A→B→C→A cycle\n\n### Prevention\nBreak any one condition to prevent deadlock!\n\n💡 **Simple analogy:** Two people at a narrow door, each waiting for the other to go first.`;
-  return `Great question! Here's what I know about that topic:\n\nThis is a **demo response**. When connected to the AI backend, I'll provide detailed, personalized explanations with examples, diagrams, and practice questions.\n\n### What I can help with:\n- 📚 CS subjects (DSA, OS, DBMS, Networks)\n- 🏛️ UPSC topics (Polity, History, Geography)\n- 🧮 Problem solving & code explanations\n\nTry asking something specific!`;
-};
-
 const Chat = () => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const { toast } = useToast();
 
-  /* Auto-scroll to bottom when messages change */
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, isTyping]);
 
   const sendMessage = async (text: string) => {
-    if (!text.trim()) return;
+    if (!text.trim() || isTyping) return;
 
     const userMsg: Message = { id: Date.now().toString(), role: "user", content: text };
-    setMessages((prev) => [...prev, userMsg]);
+    const newMessages = [...messages, userMsg];
+    setMessages(newMessages);
     setInput("");
     setIsTyping(true);
 
-    /* Simulate AI response delay */
-    await new Promise((r) => setTimeout(r, 800 + Math.random() * 1200));
+    let assistantContent = "";
 
-    const aiMsg: Message = {
-      id: (Date.now() + 1).toString(),
-      role: "assistant",
-      content: getMockResponse(text),
-    };
-    setMessages((prev) => [...prev, aiMsg]);
-    setIsTyping(false);
+    try {
+      const resp = await fetch(CHAT_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY}`,
+        },
+        body: JSON.stringify({
+          messages: newMessages.map((m) => ({ role: m.role, content: m.content })),
+        }),
+      });
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        throw new Error(errData.error || `Error ${resp.status}`);
+      }
+
+      const reader = resp.body?.getReader();
+      if (!reader) throw new Error("No stream");
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      const updateAssistant = (content: string) => {
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (last?.role === "assistant") {
+            return prev.map((m, i) => (i === prev.length - 1 ? { ...m, content } : m));
+          }
+          return [...prev, { id: (Date.now() + 1).toString(), role: "assistant", content }];
+        });
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let newlineIdx: number;
+        while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
+          let line = buffer.slice(0, newlineIdx);
+          buffer = buffer.slice(newlineIdx + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (jsonStr === "[DONE]") break;
+          try {
+            const parsed = JSON.parse(jsonStr);
+            const delta = parsed.choices?.[0]?.delta?.content;
+            if (delta) {
+              assistantContent += delta;
+              updateAssistant(assistantContent);
+            }
+          } catch {
+            // partial JSON, skip
+          }
+        }
+      }
+    } catch (e: any) {
+      toast({ variant: "destructive", title: "AI Error", description: e.message });
+      // Remove the user message if AI failed
+      setMessages(messages);
+    } finally {
+      setIsTyping(false);
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -71,7 +117,6 @@ const Chat = () => {
 
   return (
     <div className="flex flex-col h-[calc(100vh-8rem)] max-w-3xl mx-auto">
-      {/* Messages area */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-4 pb-4">
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center px-4">
@@ -80,10 +125,8 @@ const Chat = () => {
             </div>
             <h3 className="text-xl font-bold text-foreground">AI Study Tutor</h3>
             <p className="text-muted-foreground text-sm mt-2 max-w-md">
-              Ask me anything about your subjects. I'll explain concepts simply with
-              examples and analogies.
+              Ask me anything about your subjects. I'll explain concepts with examples and analogies.
             </p>
-            {/* Suggestion chips */}
             <div className="flex flex-wrap justify-center gap-2 mt-6">
               {suggestions.map((s) => (
                 <button
@@ -112,9 +155,7 @@ const Chat = () => {
             )}
             <div
               className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                msg.role === "user"
-                  ? "gradient-primary text-primary-foreground"
-                  : "glass-card"
+                msg.role === "user" ? "gradient-primary text-primary-foreground" : "glass-card"
               }`}
             >
               {msg.role === "assistant" ? (
@@ -133,13 +174,8 @@ const Chat = () => {
           </motion.div>
         ))}
 
-        {/* Typing indicator */}
-        {isTyping && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="flex gap-3"
-          >
+        {isTyping && messages[messages.length - 1]?.role !== "assistant" && (
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-3">
             <div className="w-8 h-8 rounded-lg gradient-primary flex items-center justify-center">
               <Bot className="h-4 w-4 text-primary-foreground" />
             </div>
@@ -154,11 +190,7 @@ const Chat = () => {
         )}
       </div>
 
-      {/* Input area */}
-      <form
-        onSubmit={handleSubmit}
-        className="flex gap-2 pt-3 border-t border-border"
-      >
+      <form onSubmit={handleSubmit} className="flex gap-2 pt-3 border-t border-border">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -166,11 +198,7 @@ const Chat = () => {
           className="flex-1 bg-muted rounded-xl px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-secondary/50"
           disabled={isTyping}
         />
-        <Button
-          type="submit"
-          disabled={!input.trim() || isTyping}
-          className="gradient-primary text-primary-foreground rounded-xl px-4"
-        >
+        <Button type="submit" disabled={!input.trim() || isTyping} className="gradient-primary text-primary-foreground rounded-xl px-4">
           <Send className="h-4 w-4" />
         </Button>
       </form>
