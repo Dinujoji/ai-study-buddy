@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import {
   BookOpen,
@@ -6,7 +7,6 @@ import {
   Target,
   TrendingUp,
   Clock,
-  Star,
   ChevronRight,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -18,44 +18,12 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  LineChart,
-  Line,
   RadialBarChart,
   RadialBar,
 } from "recharts";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/useAuth";
 
-/* Mock data for the dashboard - will be replaced with real data from Lovable Cloud */
-const weeklyProgress = [
-  { day: "Mon", minutes: 45 },
-  { day: "Tue", minutes: 60 },
-  { day: "Wed", minutes: 30 },
-  { day: "Thu", minutes: 90 },
-  { day: "Fri", minutes: 55 },
-  { day: "Sat", minutes: 75 },
-  { day: "Sun", minutes: 40 },
-];
-
-const subjectScores = [
-  { subject: "DSA", score: 78 },
-  { subject: "OS", score: 65 },
-  { subject: "DBMS", score: 82 },
-  { subject: "Networks", score: 55 },
-  { subject: "Polity", score: 70 },
-  { subject: "History", score: 60 },
-];
-
-const overallProgress = [{ name: "Progress", value: 68, fill: "hsl(174, 60%, 50%)" }];
-
-const subjects = [
-  { name: "Data Structures", progress: 78, total: 45, completed: 35, color: "bg-primary" },
-  { name: "Operating Systems", progress: 65, total: 30, completed: 19, color: "bg-secondary" },
-  { name: "DBMS", progress: 82, total: 25, completed: 20, color: "bg-success" },
-  { name: "Computer Networks", progress: 55, total: 35, completed: 19, color: "bg-info" },
-  { name: "Indian Polity (UPSC)", progress: 70, total: 40, completed: 28, color: "bg-accent" },
-  { name: "Modern History", progress: 60, total: 30, completed: 18, color: "bg-streak" },
-];
-
-/* Stat card component for the top row */
 const StatCard = ({
   icon: Icon,
   label,
@@ -69,10 +37,7 @@ const StatCard = ({
   sub: string;
   gradient: string;
 }) => (
-  <motion.div
-    whileHover={{ y: -2 }}
-    className="glass-card rounded-xl p-5"
-  >
+  <motion.div whileHover={{ y: -2 }} className="glass-card rounded-xl p-5">
     <div className="flex items-start justify-between">
       <div>
         <p className="text-sm text-muted-foreground">{label}</p>
@@ -87,55 +52,111 @@ const StatCard = ({
 );
 
 const Dashboard = () => {
+  const { user } = useAuth();
+  const [stats, setStats] = useState({
+    streak: 0,
+    longestStreak: 0,
+    quizzesTaken: 0,
+    avgScore: 0,
+    totalMinutes: 0,
+    notesCount: 0,
+  });
+  const [weeklyData, setWeeklyData] = useState<{ day: string; minutes: number }[]>([]);
+  const [displayName, setDisplayName] = useState("Student");
+
+  useEffect(() => {
+    if (!user) return;
+
+    const fetchData = async () => {
+      // Fetch profile
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("display_name")
+        .eq("user_id", user.id)
+        .single();
+      if (profile?.display_name) setDisplayName(profile.display_name);
+
+      // Fetch streak
+      const { data: streak } = await supabase
+        .from("streaks")
+        .select("*")
+        .eq("user_id", user.id)
+        .single();
+
+      // Fetch quiz results
+      const { data: quizzes } = await supabase
+        .from("quiz_results")
+        .select("*")
+        .eq("user_id", user.id);
+
+      // Fetch notes count
+      const { count: notesCount } = await supabase
+        .from("notes")
+        .select("*", { count: "exact", head: true })
+        .eq("user_id", user.id);
+
+      // Fetch study sessions
+      const { data: sessions } = await supabase
+        .from("study_sessions")
+        .select("*")
+        .eq("user_id", user.id);
+
+      const totalMinutes = sessions?.reduce((acc, s) => acc + s.duration_minutes, 0) || 0;
+      const avgScore = quizzes && quizzes.length > 0
+        ? Math.round(quizzes.reduce((acc, q) => acc + (q.score / q.total_questions) * 100, 0) / quizzes.length)
+        : 0;
+
+      setStats({
+        streak: streak?.current_streak || 0,
+        longestStreak: streak?.longest_streak || 0,
+        quizzesTaken: quizzes?.length || 0,
+        avgScore,
+        totalMinutes,
+        notesCount: notesCount || 0,
+      });
+
+      // Build weekly data from sessions
+      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      const now = new Date();
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - now.getDay() + 1);
+
+      const weekly = days.map((day, i) => {
+        const date = new Date(weekStart);
+        date.setDate(weekStart.getDate() + i);
+        const dayStr = date.toISOString().split("T")[0];
+        const mins = sessions
+          ?.filter((s) => s.created_at.startsWith(dayStr))
+          .reduce((acc, s) => acc + s.duration_minutes, 0) || 0;
+        return { day, minutes: mins };
+      });
+      setWeeklyData(weekly);
+    };
+
+    fetchData();
+  }, [user]);
+
+  const overallProgress = [{ name: "Progress", value: stats.avgScore, fill: "hsl(174, 60%, 50%)" }];
+
   return (
     <div className="space-y-6 max-w-7xl">
-      {/* Welcome header */}
       <div>
-        <h2 className="text-2xl font-bold text-foreground">Welcome back, Student! 👋</h2>
-        <p className="text-muted-foreground mt-1">
-          Here's your learning progress for this week
-        </p>
+        <h2 className="text-2xl font-bold text-foreground">Welcome back, {displayName}! 👋</h2>
+        <p className="text-muted-foreground mt-1">Here's your learning progress</p>
       </div>
 
-      {/* Stats row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard
-          icon={Flame}
-          label="Current Streak"
-          value="7 days"
-          sub="Personal best: 14 days"
-          gradient="gradient-accent"
-        />
-        <StatCard
-          icon={Brain}
-          label="Quizzes Taken"
-          value="42"
-          sub="+5 this week"
-          gradient="gradient-primary"
-        />
-        <StatCard
-          icon={Target}
-          label="Avg Score"
-          value="76%"
-          sub="↑ 4% from last week"
-          gradient="gradient-success"
-        />
-        <StatCard
-          icon={Clock}
-          label="Study Time"
-          value="6.5 hrs"
-          sub="This week total"
-          gradient="gradient-primary"
-        />
+        <StatCard icon={Flame} label="Current Streak" value={`${stats.streak} days`} sub={`Best: ${stats.longestStreak} days`} gradient="gradient-accent" />
+        <StatCard icon={Brain} label="Quizzes Taken" value={String(stats.quizzesTaken)} sub="AI-generated quizzes" gradient="gradient-primary" />
+        <StatCard icon={Target} label="Avg Score" value={`${stats.avgScore}%`} sub="Across all quizzes" gradient="gradient-success" />
+        <StatCard icon={Clock} label="Study Time" value={`${Math.round(stats.totalMinutes / 60 * 10) / 10} hrs`} sub="Total recorded" gradient="gradient-primary" />
       </div>
 
-      {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Weekly study time bar chart */}
         <div className="lg:col-span-2 glass-card rounded-xl p-5">
           <h3 className="font-semibold text-foreground mb-4">Weekly Study Time</h3>
           <ResponsiveContainer width="100%" height={240}>
-            <BarChart data={weeklyProgress}>
+            <BarChart data={weeklyData}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
               <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={12} />
               <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} />
@@ -152,94 +173,43 @@ const Dashboard = () => {
           </ResponsiveContainer>
         </div>
 
-        {/* Overall progress radial */}
         <div className="glass-card rounded-xl p-5 flex flex-col items-center justify-center">
-          <h3 className="font-semibold text-foreground mb-2">Overall Progress</h3>
+          <h3 className="font-semibold text-foreground mb-2">Overall Score</h3>
           <ResponsiveContainer width="100%" height={180}>
-            <RadialBarChart
-              cx="50%"
-              cy="50%"
-              innerRadius="60%"
-              outerRadius="90%"
-              data={overallProgress}
-              startAngle={90}
-              endAngle={-270}
-            >
-              <RadialBar
-                dataKey="value"
-                cornerRadius={10}
-                background={{ fill: "hsl(var(--muted))" }}
-              />
+            <RadialBarChart cx="50%" cy="50%" innerRadius="60%" outerRadius="90%" data={overallProgress} startAngle={90} endAngle={-270}>
+              <RadialBar dataKey="value" cornerRadius={10} background={{ fill: "hsl(var(--muted))" }} />
             </RadialBarChart>
           </ResponsiveContainer>
-          <p className="text-3xl font-bold text-foreground -mt-4">68%</p>
-          <p className="text-sm text-muted-foreground">Across all subjects</p>
+          <p className="text-3xl font-bold text-foreground -mt-4">{stats.avgScore}%</p>
+          <p className="text-sm text-muted-foreground">Average quiz score</p>
         </div>
       </div>
 
-      {/* Subject performance line chart */}
-      <div className="glass-card rounded-xl p-5">
-        <h3 className="font-semibold text-foreground mb-4">Subject Performance</h3>
-        <ResponsiveContainer width="100%" height={240}>
-          <LineChart data={subjectScores}>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
-            <XAxis dataKey="subject" stroke="hsl(var(--muted-foreground))" fontSize={12} />
-            <YAxis stroke="hsl(var(--muted-foreground))" fontSize={12} domain={[0, 100]} />
-            <Tooltip
-              contentStyle={{
-                background: "hsl(var(--card))",
-                border: "1px solid hsl(var(--border))",
-                borderRadius: "8px",
-                color: "hsl(var(--foreground))",
-              }}
-            />
-            <Line
-              type="monotone"
-              dataKey="score"
-              stroke="hsl(var(--primary))"
-              strokeWidth={2.5}
-              dot={{ fill: "hsl(var(--primary))", r: 5 }}
-              activeDot={{ r: 7, fill: "hsl(var(--secondary))" }}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Subjects list */}
+      {/* Quick actions */}
       <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold text-foreground">Your Subjects</h3>
-          <Link
-            to="/quiz"
-            className="text-sm text-secondary hover:underline flex items-center gap-1"
-          >
-            Start Quiz <ChevronRight className="h-4 w-4" />
-          </Link>
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {subjects.map((subject) => (
-            <motion.div
-              key={subject.name}
-              whileHover={{ y: -2 }}
-              className="glass-card rounded-xl p-5"
-            >
-              <div className="flex items-center gap-3 mb-3">
-                <div className={`${subject.color} h-2.5 w-2.5 rounded-full`} />
-                <h4 className="font-medium text-foreground text-sm">{subject.name}</h4>
-              </div>
-              {/* Progress bar */}
-              <div className="w-full bg-muted rounded-full h-2 mb-2">
-                <div
-                  className={`${subject.color} h-2 rounded-full transition-all`}
-                  style={{ width: `${subject.progress}%` }}
-                />
-              </div>
-              <div className="flex justify-between text-xs text-muted-foreground">
-                <span>{subject.completed}/{subject.total} topics</span>
-                <span>{subject.progress}%</span>
-              </div>
+        <h3 className="text-lg font-semibold text-foreground mb-4">Quick Actions</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <Link to="/quiz">
+            <motion.div whileHover={{ y: -2 }} className="glass-card rounded-xl p-5 cursor-pointer hover:border-primary/50 transition-colors">
+              <Brain className="h-6 w-6 text-primary mb-2" />
+              <h4 className="font-medium text-foreground text-sm">Start a Quiz</h4>
+              <p className="text-xs text-muted-foreground mt-1">AI-generated adaptive questions</p>
             </motion.div>
-          ))}
+          </Link>
+          <Link to="/chat">
+            <motion.div whileHover={{ y: -2 }} className="glass-card rounded-xl p-5 cursor-pointer hover:border-secondary/50 transition-colors">
+              <BookOpen className="h-6 w-6 text-secondary mb-2" />
+              <h4 className="font-medium text-foreground text-sm">Ask AI Tutor</h4>
+              <p className="text-xs text-muted-foreground mt-1">Get instant explanations</p>
+            </motion.div>
+          </Link>
+          <Link to="/recommendations">
+            <motion.div whileHover={{ y: -2 }} className="glass-card rounded-xl p-5 cursor-pointer hover:border-accent/50 transition-colors">
+              <TrendingUp className="h-6 w-6 text-accent mb-2" />
+              <h4 className="font-medium text-foreground text-sm">Study Plan</h4>
+              <p className="text-xs text-muted-foreground mt-1">AI-powered daily schedule</p>
+            </motion.div>
+          </Link>
         </div>
       </div>
     </div>
